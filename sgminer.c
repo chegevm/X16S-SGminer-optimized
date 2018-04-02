@@ -90,6 +90,13 @@ bool (*gpu_stats)(int, float *, int *, int *, float *, int *, int *, int *, int 
 
 void (*gpu_autotune) (int, enum dev_enable *);
 
+
+#include "algorithm/evocoin.h"
+#include "algorithm/timetravel10.h"
+#include "algorithm/x16r.h"
+#define DEFAULT_SEQUENCE "0123456789A"
+#define DEFAULT_SEQUENCE_16 "0123456789ABCDEF"
+
 static char packagename[256];
 
 static bool startup = true; //sgminer is starting up
@@ -193,6 +200,8 @@ double opt_diff_mult = 0.0;
 
 char *opt_kernel_path;
 char *sgminer_path;
+
+char* opt_benchmark_seq;
 
 #define QUIET (opt_quiet || opt_realquiet)
 
@@ -371,7 +380,7 @@ static void set_current_pool(struct pool *pool) {
   currentpool = pool;
 
   cg_wlock(&currentpool->data_lock);
-  if (currentpool->algorithm.type == ALGO_ETHASH) 
+  if (currentpool->algorithm.type == ALGO_ETHASH)
     currentpool->eth_cache.disabled = false;
   cg_wunlock(&currentpool->data_lock);
 }
@@ -1398,6 +1407,22 @@ char *set_difficulty_multiplier(char *arg)
   return NULL;
 }
 
+char *set_benchmark_sequence(char *arg)
+{
+  if (!(arg && arg[0]))
+    return "Invalid parameter for set benchmark sequence";
+  if (strlen(arg) == 0)
+    return "Benchmark sequence must be non-empty";
+  if (strlen(arg) > 16)
+    return "Benchmark sequence is at most 16 characters";
+  uint i;
+  for (i = 0; i < strlen(arg); i++) {
+    if (!( ('0' <= arg[i] <= '9') || ('A' <= arg[i] <= 'F')))
+      return sprintf("Invalid hex digit %c", arg[i]);
+  }
+  opt_set_charp(arg, &opt_benchmark_seq);
+}
+
 /* These options are available from config file or commandline */
 struct opt_table opt_config_table[] = {
   OPT_WITH_ARG("--algorithm|--kernel|-k",
@@ -1558,6 +1583,11 @@ struct opt_table opt_config_table[] = {
   OPT_WITHOUT_ARG("--luffa-parallel",
       opt_set_bool, &opt_luffa_parallel,
       "Set SPH_LUFFA_PARALLEL for Xn derived algorithms (Can give better hashrate for some GPUs)"),
+  OPT_WITH_ARG("--benchmark-sequence",
+      set_benchmark_sequence, NULL, NULL,
+      "Hardcode the algorithm sequence x16r/x16s/x11evo/timetravel"
+      " for benchmarking purposes. Must be an uppercase hex string"
+      "of length 1-16"),
 #ifdef HAVE_CURSES
   OPT_WITHOUT_ARG("--incognito",
       opt_set_bool, &opt_incognito,
@@ -2071,7 +2101,7 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
     applog(LOG_DEBUG, "gbt_txns: %s", pool->coinbasetxn);
     goto out;
   }
-  
+
   if (!pool->gbt_txns)
     goto out;
 
@@ -3324,7 +3354,7 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
       str_len += strlen(workid);
     }
     */
-    
+
     uint8_t txn_cnt_bin[9];
     cg_rlock(&pool->gbt_lock);
     int txn_cnt_len = add_var_int(txn_cnt_bin, pool->gbt_txns + 1);
@@ -5609,11 +5639,11 @@ static bool parse_stratum_response(struct pool *pool, char *s)
 
         if (err_val) {
           ss = json_dumps(err_val, JSON_INDENT(3));
-        } 
+        }
         else {
           ss = strdup("(unknown reason)");
         }
-        
+
         applog(LOG_INFO, "JSON-RPC response decode failed: %s", ss);
 
         free(ss);
@@ -5835,7 +5865,7 @@ static void *stratum_rthread(void *userdata)
     FD_SET(pool->sock, &rd);
     timeout.tv_sec = 90;
     timeout.tv_usec = 0;
-    
+
     /* The protocol specifies that notify messages should be sent
      * every minute so if we fail to receive any for 90 seconds we
      * assume the connection has been dropped and treat this pool
@@ -5879,7 +5909,7 @@ static void *stratum_rthread(void *userdata)
     stratum_resumed(pool);
 
     applog(LOG_DEBUG, "%s: parsing %s...", __func__, s);
-    
+
     if (!parse_method(pool, s) && !parse_stratum_response(pool, s))
       applog(LOG_INFO, "Unknown stratum msg: %s", s);
     else if (pool->swork.clean) {
@@ -5888,16 +5918,16 @@ static void *stratum_rthread(void *userdata)
       /* Generate a single work item to update the current
        * block database */
       pool->swork.clean = false;
-      
+
       switch(pool->algorithm.type) {
         case ALGO_ETHASH:
           gen_stratum_work_eth(pool, work);
           break;
-        
+
         case ALGO_CRYPTONIGHT:
           gen_stratum_work_cn(pool, work);
           break;
-          
+
         default:
           gen_stratum_work(pool, work);
       }
@@ -5988,14 +6018,14 @@ static void *stratum_sthread(void *userdata)
       applog(LOG_DEBUG, "stratum_sthread() algorithm = %s", pool->algorithm.name);
 
       char *ASCIINonce = bin2hex(work->data + 39, 4);
-      
+
       ASCIIResult = bin2hex(work->hash, 32);
-      
+
       mutex_lock(&sshare_lock);
       /* Give the stratum share a unique id */
       sshare->id = swork_id++;
       mutex_unlock(&sshare_lock);
-      
+
       snprintf(s, s_size, "{\"method\": \"submit\", \"params\": {\"id\": \"%s\", \"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, \"id\":%d}", pool->XMRAuthID, work->job_id, ASCIINonce, ASCIIResult, sshare->id);
 
       free(ASCIINonce);
@@ -6010,13 +6040,13 @@ static void *stratum_sthread(void *userdata)
       sshare->work = work;
 
       applog(LOG_DEBUG, "stratum_sthread() algorithm = %s", pool->algorithm.name);
-      
+
       //get nonce minus extranonce set by server
       nonce = bin2hex(work->equihash_data+108, 32);
       solution = bin2hex(work->equihash_data+140, 1347);
-      
+
       //applog(LOG_DEBUG, "%s: Nonce set to %s", __func__, nonce+strlen(work->nonce1));
-      
+
       mutex_lock(&sshare_lock);
       /* Give the stratum share a unique id */
       sshare->id = swork_id++;
@@ -6189,7 +6219,7 @@ retry_stratum:
 
       if (ret) {
         init_stratum_threads(pool);
-        
+
         if (pool->algorithm.type == ALGO_CRYPTONIGHT) {
           struct work *work = make_work();
           gen_stratum_work_cn(pool, work);
@@ -6251,6 +6281,19 @@ retry_stratum:
         pool->has_gbt = true;
         pool->rpc_req = _gbt_req;
       }
+
+	  if (append) {
+		  applog(LOG_DEBUG, "Append Enabled\n");
+	  }else {
+		  applog(LOG_DEBUG, "Append Disabled\n");
+	  }
+
+	  if (submit) {
+		 applog(LOG_DEBUG, "Submit Enabled\n");
+	  } else {
+		 applog(LOG_DEBUG, "Submit Disabled\n");
+	  }
+
     }
     /* Reset this so we can probe fully just after this. It will be
      * set to true that time.*/
@@ -6609,7 +6652,7 @@ static void gen_stratum_work_cn(struct pool *pool, struct work *work)
     return;
 
   applog(LOG_DEBUG, "[THR%d] gen_stratum_work_cn() - algorithm = %s", work->thr_id, pool->algorithm.name);
-  
+
   cg_rlock(&pool->data_lock);
   work->job_id = strdup(pool->swork.job_id);
   //strcpy(work->XMRID, pool->XMRID);
@@ -6621,7 +6664,7 @@ static void gen_stratum_work_cn(struct pool *pool, struct work *work)
   work->network_diff = pool->diff1;
   work->is_monero = pool->is_monero;
   cg_runlock(&pool->data_lock);
-  
+
   local_work++;
   work->pool = pool;
   work->stratum = true;
@@ -6635,7 +6678,7 @@ static void gen_stratum_work_cn(struct pool *pool, struct work *work)
   work->drv_rolllimit = 0;
 
   cgtime(&work->tv_staged);
-  
+
   applog(LOG_DEBUG, "gen_stratum_work_cn() done.");
 }
 
@@ -6647,15 +6690,15 @@ static void gen_stratum_work_equihash(struct pool *pool, struct work *work)
 
   /* Downgrade to a read lock to read off the pool variables */
   cg_dwlock(&pool->data_lock);
-  
+
   /* equihash already has the merkle root in the header no need to change it */
   memset(work->equihash_data, 0, 1487);
   memcpy(work->equihash_data, pool->header_bin, 128);
-  
+
   //add pool extra nonce
   hex2bin(work->equihash_data + 108, pool->nonce1, strlen(pool->nonce1) / 2);
   memcpy(work->equihash_data + 108 + 20 - work->nonce2_len, &work->nonce2, work->nonce2_len);
- 
+
   //add solutionsize
   add_var_int(work->equihash_data + 140, 1344);
 
@@ -6702,7 +6745,7 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
     gen_stratum_work_equihash(pool, work);
     return;
   }
-  
+
   unsigned char merkle_root[32], merkle_sha[64];
   uint32_t *data32, *swap32;
   uint64_t nonce2le;
@@ -6859,7 +6902,7 @@ static void apply_initial_gpu_settings(struct pool *pool)
   rd_lock(&mining_thr_lock);
 
   apply_switcher_options(options, pool);
-  
+
   //manually apply algorithm
   for (i = 0; i < nDevs; i++)
   {
@@ -7192,11 +7235,204 @@ static void mutex_unlock_cleanup_handler(void *mutex)
   mutex_unlock((pthread_mutex_t *) mutex);
 }
 
+static bool checkIfNeedSwitch(struct thr_info *mythr, struct work *work)
+{
+    bool algoSwitch = true;
+
+    if (work && work->pool) {
+      char result[100];
+      char code[17];
+
+      if (opt_benchmark_seq) {
+        strncpy(code, opt_benchmark_seq, 17);
+      }
+      else {
+        if (work->pool->algorithm.type == ALGO_X11EVO) {
+          evocoin_twisted_code(result, work->pool->swork.ntime, code);
+        } else if (work->pool->algorithm.type == ALGO_TIMETRAVEL10) {
+          timetravel10_twisted_code(result, work->pool->swork.ntime, code);
+        } else if (work->pool->algorithm.type == ALGO_X16R) {
+          x16r_twisted_code((const uint32_t *)work->data, code);
+        } else if (work->pool->algorithm.type == ALGO_X16S) {
+          x16s_twisted_code((const uint32_t *)work->data, code);
+        }
+      }
+
+      if (strcmp(code, mythr->curSequence) == 0) {
+        algoSwitch = false;
+      } else {
+        if (!mythr->id) applog(LOG_NOTICE, "Switching algo order to %s", code);
+        strcpy(mythr->curSequence, code);
+      }
+    }
+
+  return ((work->pool->algorithm.type == ALGO_X11EVO ||
+      work->pool->algorithm.type == ALGO_TIMETRAVEL10)
+    && (algoSwitch || !mythr->work));
+}
+
+static void twistTheRevolver(struct thr_info *mythr, struct work *work)
+{
+	applog(LOG_DEBUG, "Twist the revolver. Time = %s" , work->pool->swork.ntime);
+
+	bool softReset = true;
+	int i;
+
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	mutex_lock(&algo_switch_lock);
+
+	mutex_lock(&algo_switch_wait_lock);
+	algo_switch_n++;
+	mutex_unlock(&algo_switch_wait_lock);
+
+	//get the number of active threads to know when to switch... if we only check total threads, we may wait for ever on a disabled GPU
+	int active_threads = 0;
+
+	rd_lock(&mining_thr_lock);
+	for (i = 0; i < mining_threads; i++)
+	{
+		struct cgpu_info *cgpu = mining_thr[i]->cgpu;
+
+		//dont count dead/sick GPU threads or we may wait for ever also...
+		if (cgpu->deven != DEV_DISABLED && cgpu->status != LIFE_SICK && cgpu->status != LIFE_DEAD)
+			active_threads++;
+	}
+	rd_unlock(&mining_thr_lock);
+
+	// If all threads are waiting now
+	if (algo_switch_n >= active_threads)
+	{
+		const char *opt;
+
+		applog(LOG_DEBUG, "Applying pool settings for %s...", isnull(get_pool_name(work->pool), ""));
+		rd_lock(&mining_thr_lock);
+
+		// Shutdown all threads first (necessary)
+		if (softReset)
+		{
+			applog(LOG_DEBUG, "Soft Reset... Shutdown threads...");
+			for (i = 0; i < mining_threads; i++)
+			{
+				struct thr_info *thr = mining_thr[i];
+				thr->cgpu->drv->thread_shutdown(thr);
+			}
+		}
+
+		// Reset stats (e.g. for working_diff to be set properly in hash_sole_work)
+		zero_stats();
+
+		//apply switcher options
+		apply_switcher_options(pool_switch_options, work->pool);
+
+		// Change algorithm for each thread (thread_prepare calls initCl)
+		if (softReset)
+			applog(LOG_DEBUG, "Soft Reset... Restarting threads...");
+
+		struct thr_info *thr;
+
+
+		for (i = 0; i < mining_threads; i++)
+		{
+			thr = mining_thr[i];
+
+			if (softReset)
+			{
+				thr->work = work;
+				thr->cgpu->drv->thread_prepare(thr);
+				thr->cgpu->drv->thread_init(thr);
+			}
+
+			// Necessary because algorithms can have dramatically different diffs
+			thr->cgpu->drv->working_diff = 1;
+		}
+
+		rd_unlock(&mining_thr_lock);
+		mutex_unlock(&algo_switch_lock);
+
+		// Hard restart if needed
+		if (!softReset)
+		{
+			applog(LOG_DEBUG, "Hard Reset Mining Threads...");
+
+			//if devices changed... enable/disable as needed
+			//if (opt_isset(pool_switch_options, SWITCHER_APPLY_DEVICE))
+			//	enable_devices();
+
+			//figure out how many mining threads we'll need
+			unsigned int n_threads = 0;
+			pthread_t restart_thr;
+
+#ifdef HAVE_ADL
+			//change gpu threads if needed
+			//if (opt_isset(pool_switch_options, SWITCHER_APPLY_GT))
+			//{
+			//	if (!empty_string((opt = get_pool_setting(work->pool->gpu_threads, default_profile.gpu_threads))))
+			//		set_gpu_threads(opt);
+			//}
+
+			rd_lock(&devices_lock);
+			for (i = 0; i < total_devices; i++)
+				if (!opt_removedisabled || !opt_devs_enabled || devices_enabled[i])
+					n_threads += devices[i]->threads;
+			rd_unlock(&devices_lock);
+#else
+			n_threads = mining_threads;
+#endif
+
+			if (unlikely(pthread_create(&restart_thr, NULL, restart_mining_threads_thread, (void *)(intptr_t)n_threads)))
+				quit(1, "restart_mining_threads create thread failed");
+
+			applog(LOG_DEBUG, "Hard reset: Exiting mining thread %d", mythr->id);
+			pthread_exit(NULL);
+		}
+		else
+		{
+			// Signal other threads to start working now
+			mutex_lock(&algo_switch_wait_lock);
+			algo_switch_n = 0;
+			pthread_cond_broadcast(&algo_switch_wait_cond);
+			mutex_unlock(&algo_switch_wait_lock);
+
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+			// no need to wait, exit
+			return;
+		}
+	}
+	else {
+		mutex_unlock(&algo_switch_lock);
+
+		if (!softReset) {
+			applog(LOG_DEBUG, "Hard reset: Exiting mining thread %d", mythr->id);
+			pthread_exit(NULL);
+		}
+	}
+
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+	// Set cleanup instructions in the event that the thread is cancelled
+	pthread_cleanup_push(mutex_unlock_cleanup_handler, (void *)&algo_switch_wait_lock);
+	// Wait for signal to start working again
+	mutex_lock(&algo_switch_wait_lock);
+	while (algo_switch_n > 0)
+		pthread_cond_wait(&algo_switch_wait_cond, &algo_switch_wait_lock);
+	// Non-zero argument will execute the cleanup handler after popping it
+	pthread_cleanup_pop(1);
+}
+
+
 static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
   int i;
 
   applog(LOG_DEBUG, "[THR%d] get_work_prepare_thread", mythr->id);
+
+
+
+  if (checkIfNeedSwitch(mythr, work)) {
+	  twistTheRevolver(mythr, work);
+	  return;
+  }
 
   //if switcher is disabled
   if(opt_switchmode == SWITCH_OFF)
@@ -7651,6 +7887,7 @@ static void hash_sole_work(struct thr_info *mythr)
 
   while (likely(!cgpu->shutdown)) {
     struct work *work = get_work(mythr, thr_id);
+
     int64_t hashes;
 
     mythr->work_restart = false;
@@ -9031,11 +9268,26 @@ static void restart_mining_threads(unsigned int new_n_threads)
     }
 
     applog(LOG_DEBUG, "Assign threads for device %d", i);
-    for (j = 0; j < cgpu->threads; ++j, ++k)
-    {
+    for (j = 0; j < cgpu->threads; ++j, ++k) {
       thr = mining_thr[k];
       thr->id = k;
       thr->pool_no = pool->pool_no;
+      // init sequence
+      if (opt_benchmark_seq) {
+        applog(LOG_NOTICE, "[THR%d] Setting benchmark algo order to %s",
+          thr->id, opt_benchmark_seq);
+        strcpy(thr->curSequence, opt_benchmark_seq);
+      }
+      else {
+        if (cgpu->algorithm.type == ALGO_X16R ||
+            cgpu->algorithm.type == ALGO_X16S) {
+          strcpy(thr->curSequence, DEFAULT_SEQUENCE_16);
+        }
+        else {
+          strcpy(thr->curSequence, DEFAULT_SEQUENCE);
+        }
+      }
+
       applog(LOG_DEBUG, "Thread %d set pool = %d (%s)", k, thr->pool_no, isnull(get_pool_name(pools[thr->pool_no]), ""));
       thr->cgpu = cgpu;
       thr->device_thread = j;
@@ -9121,9 +9373,9 @@ int main(int argc, char *argv[])
 
   mutex_init(&eth_nonce_lock);
 #ifdef WIN32
-  rand_s(&eth_nonce);
-  for (int i = 0; i < sizeof(entropy); i += 4)
-    rand_s((uint32_t*)(entropy + i));
+  eth_nonce = (uint32_t)rand();
+  for (int i = 0; i < sizeof(entropy)/4; i ++)
+    ((uint32_t*)entropy)[i] = (uint32_t)rand();
 #else
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd < 0)
@@ -9602,15 +9854,15 @@ retry:
         case ALGO_ETHASH:
           gen_stratum_work_eth(pool, work);
           break;
-          
+
         case ALGO_CRYPTONIGHT:
           gen_stratum_work_cn(pool, work);
           break;
-          
+
         default:
            gen_stratum_work(pool, work);
       }
- 
+
       applog(LOG_DEBUG, "Generated stratum work");
       stage_work(work);
       continue;

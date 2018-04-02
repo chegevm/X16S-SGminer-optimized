@@ -39,6 +39,9 @@
 #include "algorithm/yescrypt.h"
 #include "algorithm/lyra2rev2.h"
 #include "algorithm/equihash.h"
+#include "algorithm/evocoin.h"
+#include "algorithm/timetravel10.h"
+#include "algorithm/x16r.h"
 
 /* FIXME: only here for global config vars, replace with configuration.h
  * or similar as soon as config is in a struct instead of littered all
@@ -238,7 +241,7 @@ static void set_threads_hashes(unsigned int vectors, unsigned int compute_shader
   *globalThreads = threads;
 }
 
-_clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *algorithm)
+_clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *algorithm, struct thr_info *thr)
 {
   cl_int status = 0;
   size_t compute_units = 0;
@@ -764,6 +767,28 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
     strcat(build_data->binary_filename, "g");
   }
 
+  char x11EvoCode[17];
+  x11EvoCode[0] = 0;
+
+  if (cgpu->algorithm.type == ALGO_X11EVO) {
+	  char algoSuffixCode[100];
+	  char *ntime = "00000000";
+	  if (thr && thr->work) {
+		  ntime = thr->work->pool->swork.ntime;
+	  }
+	  evocoin_twisted_code(algoSuffixCode, ntime, x11EvoCode);
+	  strcat(build_data->binary_filename, algoSuffixCode);
+  }
+  if (cgpu->algorithm.type == ALGO_TIMETRAVEL10) {
+	  char algoSuffixCode[100];
+	  char *ntime = "00000000";
+	  if (thr && thr->work) {
+		  ntime = thr->work->pool->swork.ntime;
+	  }
+	  timetravel10_twisted_code(algoSuffixCode, ntime, x11EvoCode);
+	  strcat(build_data->binary_filename, algoSuffixCode);
+  }
+
   set_base_compiler_options(build_data);
   if (algorithm->set_compile_options) {
     algorithm->set_compile_options(build_data, cgpu, algorithm);
@@ -774,11 +799,10 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
 
   // Load program from file or build it if it doesn't exist
   if (!(clState->program = load_opencl_binary_kernel(build_data))) {
-    applog(LOG_NOTICE, "Building binary %s", build_data->binary_filename);
+    applog(LOG_WARNING, "Building binary %s for the first time.\nThis may take several minutes.", build_data->binary_filename);
 
-    if (!(clState->program = build_opencl_kernel(build_data, filename))) {
+    if (!(clState->program = build_opencl_kernel(build_data, filename, x11EvoCode)))
       return NULL;
-    }
 
     // If it doesn't work, oh well, build it again next run
     save_opencl_kernel(build_data, clState->program);
@@ -826,7 +850,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
     snprintf(buffer, sizeof(buffer), "buffer2");
     if (status != CL_SUCCESS)
       goto out;
-    clState->buffer3 = clCreateBuffer(clState->context, CL_MEM_READ_WRITE, RC_SIZE, NULL, &status); 
+    clState->buffer3 = clCreateBuffer(clState->context, CL_MEM_READ_WRITE, RC_SIZE, NULL, &status);
     snprintf(buffer, sizeof(buffer), "buffer3");
     if (status != CL_SUCCESS)
       goto out;
@@ -888,31 +912,30 @@ out:
     applog(LOG_ERR, "Error %d: Creating Buffer \"%s\" failed. (clCreateBuffer)", status, buffer);
     return NULL;
   }
-  else {
-    clState->kernel = clCreateKernel(clState->program, "search", &status);
-    if (status != CL_SUCCESS) {
-      applog(LOG_ERR, "Error %d: Creating Kernel from program. (clCreateKernel)", status);
-      return NULL;
-    }
-  
-    clState->n_extra_kernels = algorithm->n_extra_kernels;
-    if (clState->n_extra_kernels > 0) {
-      unsigned int i;
-      char kernel_name[9]; // max: search99 + 0x0
 
-      clState->extra_kernels = (cl_kernel *)malloc(sizeof(cl_kernel)* clState->n_extra_kernels);
+  clState->kernel = clCreateKernel(clState->program, "search", &status);
+  if (status != CL_SUCCESS) {
+    applog(LOG_ERR, "Error %d: Creating Kernel from program. (clCreateKernel)", status);
+    return NULL;
+  }
 
-      for (i = 0; i < clState->n_extra_kernels; i++) {
-        snprintf(kernel_name, 9, "%s%d", "search", i + 1);
-        clState->extra_kernels[i] = clCreateKernel(clState->program, kernel_name, &status);
-        if (status != CL_SUCCESS) {
-          applog(LOG_ERR, "Error %d: Creating ExtraKernel #%d from program. (clCreateKernel)", status, i);
-          return NULL;
-        }
+  clState->n_extra_kernels = algorithm->n_extra_kernels;
+  if (clState->n_extra_kernels > 0) {
+    unsigned int i;
+    char kernel_name[9]; // max: search99 + 0x0
+
+    clState->extra_kernels = (cl_kernel *)malloc(sizeof(cl_kernel)* clState->n_extra_kernels);
+
+    for (i = 0; i < clState->n_extra_kernels; i++) {
+      snprintf(kernel_name, 9, "search%d", i + 1);
+      clState->extra_kernels[i] = clCreateKernel(clState->program, kernel_name, &status);
+      if (status != CL_SUCCESS) {
+        applog(LOG_ERR, "Error %d: Creating ExtraKernel #%d from program. (clCreateKernel)", status, i);
+        return NULL;
       }
     }
   }
-    
+
 
   if (algorithm->type == ALGO_ETHASH) {
     clState->GenerateDAG = clCreateKernel(clState->program, "GenerateDAG", &status);
@@ -1059,7 +1082,7 @@ out:
       return NULL;
     }
   }
-  
+
   if (algorithm->type == ALGO_CRYPTONIGHT) {
     size_t GlobalThreads;
     readbufsize = 128UL;
@@ -1089,7 +1112,7 @@ out:
       return NULL;
     }
   }
-  
+
   applog(LOG_DEBUG, "Using read buffer sized %lu", (unsigned long)readbufsize);
   clState->CLbuffer0 = clCreateBuffer(clState->context, CL_MEM_READ_ONLY, readbufsize, NULL, &status);
   if (status != CL_SUCCESS) {
@@ -1109,4 +1132,3 @@ out:
 
   return clState;
 }
-

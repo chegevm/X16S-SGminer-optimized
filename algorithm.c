@@ -30,6 +30,7 @@
 #include "algorithm/bitblock.h"
 #include "algorithm/x14.h"
 #include "algorithm/x16r.h"
+#include "algorithm/x16s.h"
 #include "algorithm/fresh.h"
 #include "algorithm/whirlcoin.h"
 #include "algorithm/neoscrypt.h"
@@ -44,6 +45,8 @@
 #include "algorithm/ethash.h"
 #include "algorithm/cryptonight.h"
 #include "algorithm/equihash.h"
+#include "algorithm/evocoin.h"
+#include "algorithm/timetravel10.h"
 
 #include "compat.h"
 
@@ -56,6 +59,7 @@ const char *algorithm_type_str[] = {
   "Scrypt",
   "NScrypt",
   "X11",
+  "X11Evo",
   "X13",
   "X14",
   "X15",
@@ -723,6 +727,7 @@ static cl_int queue_x14_old_kernel(struct __clState *clState, struct _dev_blk_ct
   return status;
 }
 
+
 static cl_int queue_x16r_kernel(struct __clState *clState, struct _dev_blk_ctx *blk, __maybe_unused cl_uint threads)
 {
   cl_kernel *kernel;
@@ -749,11 +754,27 @@ static cl_int queue_x16r_kernel(struct __clState *clState, struct _dev_blk_ctx *
   CL_SET_ARG(clState->CLbuffer0);
   CL_SET_ARG(clState->padbuffer8);
 
+=======
+static cl_int queue_x16r_kernel(struct __clState *clState,
+  struct _dev_blk_ctx *blk, __maybe_unused cl_uint threads)
+{
+  cl_kernel *kernel;
+  unsigned int num, i;
+  cl_ulong le_target;
+  cl_int status = 0;
+
+  le_target = *(cl_ulong *)(blk->work->device_target + 24);
+  flip80(clState->cldata, blk->work->data);
+  status = clEnqueueWriteBuffer(clState->commandQueue, clState->CLbuffer0, true, 0, 80, clState->cldata, 0, NULL, NULL);
+
+  // output kernel
+
   kernel = &clState->kernel;
   num = 0;
   CL_SET_ARG(clState->padbuffer8);
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(le_target);
+
 
   return status;
 }
@@ -796,6 +817,33 @@ static cl_int enqueue_x16r_kernels(struct __clState *clState,
   }
 
   return 0;
+}
+
+
+=======
+  // First algo is 80-byte
+  unsigned char idx = clState->algo_sequence[0];
+  if (idx >= 'A')
+    idx = 10 + idx - 'A';
+  else
+    idx -= '0';
+  kernel = &clState->extra_kernels[2*idx];
+  num = 0;
+  CL_SET_ARG(clState->CLbuffer0);
+  CL_SET_ARG(clState->padbuffer8);
+
+  // Subsequent algos are 64-byte
+  for (int i = 1; i < 16; i++) {
+    idx = clState->algo_sequence[i];
+    if (idx >= 'A')
+      idx = 10 + idx - 'A';
+    else
+      idx -= '0';
+    kernel = &clState->extra_kernels[2*idx+1];
+    CL_SET_ARG_0(clState->padbuffer8);
+  }
+
+  return status;
 }
 
 
@@ -1118,7 +1166,7 @@ static cl_int queue_ethash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe_u
 
     cl_ulong DAGSize = EthGetDAGSize(blk->work->eth_epoch);
     size_t DAGItems = (size_t) (DAGSize / 64);
-    cgsleep_ms(128 * blk->work->thr->cgpu->device_id); 
+    cgsleep_ms(128 * blk->work->thr->cgpu->device_id);
     status |= clEnqueueNDRangeKernel(clState->commandQueue, clState->GenerateDAG, 1, NULL, &DAGItems, NULL, 0, NULL, NULL);
     clFinish(clState->commandQueue);
 
@@ -1149,7 +1197,7 @@ static cl_int queue_ethash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe_u
 
   // DO NOT flip80.
   status |= clEnqueueWriteBuffer(clState->commandQueue, clState->CLbuffer0, CL_FALSE, 0, 32, blk->work->data, 0, NULL, NULL);
-  
+
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(clState->CLbuffer0);
   CL_SET_ARG(dag->dag_buffer);
@@ -1164,7 +1212,7 @@ static cl_int queue_ethash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe_u
 }
 
 static void append_equihash_compiler_options(struct _build_kernel_data *data, struct cgpu_info *cgpu, struct _algorithm_t *algorithm)
-{  
+{
   strcat(data->compiler_options, "");
 }
 
@@ -1190,19 +1238,21 @@ static cl_int queue_cryptonight_kernel(_clState *clState, dev_blk_ctx *blk, __ma
   }
 
   memcpy(clState->cldata, blk->work->data, blk->work->XMRBlobLen);
-  
+
   status = clEnqueueWriteBuffer(clState->commandQueue, clState->CLbuffer0, CL_FALSE, 0, blk->work->XMRBlobLen, clState->cldata , 0, NULL, NULL);
-  
+
   CL_SET_ARG(clState->CLbuffer0);
   CL_SET_ARG(blk->work->XMRBlobLen);
   CL_SET_ARG(clState->Scratchpads);
   CL_SET_ARG(clState->States);
-  
+
   num = 0;
   kernel = clState->extra_kernels;
   CL_SET_ARG(clState->Scratchpads);
   CL_SET_ARG(clState->States);
-  
+  if (variant > 0)
+    CL_SET_ARG(*(cl_uint*)(clState->cldata + 35));
+
   num = 0;
   CL_NEXTKERNEL_SET_ARG(clState->Scratchpads);
   CL_SET_ARG(clState->States);
@@ -1210,35 +1260,35 @@ static cl_int queue_cryptonight_kernel(_clState *clState, dev_blk_ctx *blk, __ma
   CL_SET_ARG(clState->BranchBuffer[1]);
   CL_SET_ARG(clState->BranchBuffer[2]);
   CL_SET_ARG(clState->BranchBuffer[3]);
-  
+
   num = 0;
   CL_NEXTKERNEL_SET_ARG(clState->States);
   CL_SET_ARG(clState->BranchBuffer[0]);
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(tgt32);
-  
+
   // last to be set in driver-opencl.c
-  
+
   num = 0;
   CL_NEXTKERNEL_SET_ARG(clState->States);
   CL_SET_ARG(clState->BranchBuffer[1]);
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(tgt32);
-  
-  
+
+
   num = 0;
   CL_NEXTKERNEL_SET_ARG(clState->States);
   CL_SET_ARG(clState->BranchBuffer[2]);
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(tgt32);
-  
-  
+
+
   num = 0;
   CL_NEXTKERNEL_SET_ARG(clState->States);
   CL_SET_ARG(clState->BranchBuffer[3]);
   CL_SET_ARG(clState->outputBuffer);
   CL_SET_ARG(tgt32);
-  
+
   return(status);
 }
 
@@ -1256,7 +1306,7 @@ static cl_int queue_equihash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe
   status = clEnqueueWriteBuffer(clState->commandQueue, clState->MidstateBuf, CL_TRUE, 0, sizeof(mid_hash), mid_hash, 0, NULL, NULL);
   uint32_t dbg[2] = {0};
   status |= clEnqueueWriteBuffer(clState->commandQueue, clState->padbuffer8, CL_TRUE, 0, sizeof(dbg), &dbg, 0, NULL, NULL);
-  
+
   cl_mem rowCounters[2] = {clState->buffer2, clState->buffer3};
   for (int round = 0; round < PARAM_K; round++) {
     size_t global_ws = RC_SIZE;
@@ -1269,7 +1319,7 @@ static cl_int queue_equihash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe
     CL_SET_ARG(clState->outputBuffer);
     CL_SET_ARG(clState->CLbuffer0);
     status |= clEnqueueNDRangeKernel(clState->commandQueue, *kernel, 1, NULL, &global_ws, &local_ws, 0, NULL, NULL);
-    
+
     kernel = &clState->extra_kernels[1 + round];
     if (!round) {
       worksize = LOCAL_WORK_SIZE_ROUND0;
@@ -1284,12 +1334,12 @@ static cl_int queue_equihash_kernel(_clState *clState, dev_blk_ctx *blk, __maybe
 
   worksize = LOCAL_WORK_SIZE_POTENTIAL_SOLS;
   work_items = NR_ROWS * worksize;
-  status |= clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[1 + 9], 1, NULL, &work_items, &worksize, 0, NULL, NULL); 
+  status |= clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[1 + 9], 1, NULL, &work_items, &worksize, 0, NULL, NULL);
 
   worksize = LOCAL_WORK_SIZE_SOLS;
   work_items = MAX_POTENTIAL_SOLS * worksize;
   status |= clEnqueueNDRangeKernel(clState->commandQueue, clState->kernel, 1, NULL, &work_items, &worksize, 0, NULL, NULL);
- 
+
   return status;
 }
 #undef WORKSIZE
@@ -1352,6 +1402,8 @@ static algorithm_settings_t algos[] = {
 
   { "twecoin", ALGO_TWE, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 0, 0, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, twecoin_regenhash, NULL, queue_sph_kernel, sha256, NULL },
   { "maxcoin", ALGO_KECCAK, "", 1, 256, 1, 4, 15, 0x0F, 0xFFFFULL, 0x000000ffUL, 0, 0, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, maxcoin_regenhash, NULL, queue_maxcoin_kernel, sha256, NULL },
+  { "timetravel10", ALGO_TIMETRAVEL10, "", 1, 256, 256, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 0, 0, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, timetravel10_regenhash, NULL, queue_sph_kernel, gen_hash, append_x11_compiler_options },
+  { "evocoin", ALGO_X11EVO, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 0, 0, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, evocoin_regenhash, NULL, queue_sph_kernel, gen_hash, append_x11_compiler_options },
 
   { "darkcoin-mod", ALGO_X11, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 10, 8 * 16 * 4194304, 0, darkcoin_regenhash, NULL, queue_darkcoin_mod_kernel, gen_hash, append_x11_compiler_options },
 
@@ -1365,9 +1417,16 @@ static algorithm_settings_t algos[] = {
   { "bitblock", ALGO_X15, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 14, 4 * 16 * 4194304, 0, bitblock_regenhash, NULL, queue_bitblock_kernel, gen_hash, append_x13_compiler_options },
   { "bitblockold", ALGO_X15, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 10, 4 * 16 * 4194304, 0, bitblock_regenhash, NULL, queue_bitblockold_kernel, gen_hash, append_x13_compiler_options },
 
+
   { "x16r", ALGO_X16R, "", 1, 256, 256, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 32, 8 * 16 * 4194304, 0, x16r_regenhash, NULL, queue_x16r_kernel, gen_hash, append_x13_compiler_options, enqueue_x16r_kernels },
 
   { "talkcoin-mod", ALGO_NIST, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 4, 8 * 16 * 4194304, 0, talkcoin_regenhash, NULL, queue_talkcoin_mod_kernel, gen_hash, append_x11_compiler_options },
+=======
+  { "x16r", ALGO_X16R, "", 1, 256, 256, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 32, 4 * 16 * 4194304, 0, x16r_regenhash, NULL, queue_x16r_kernel, gen_hash, append_x13_compiler_options },
+  { "x16s", ALGO_X16S, "x16r", 1, 256, 256, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 32, 4 * 16 * 4194304, 0, x16s_regenhash, NULL, queue_x16r_kernel, gen_hash, append_x13_compiler_options },
+
+  { "talkcoin-mod", ALGO_NIST, "", 1, 1, 1, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 4,  8 * 16 * 4194304, 0, talkcoin_regenhash, queue_talkcoin_mod_kernel, gen_hash, append_x11_compiler_options},
+
 
   { "fresh", ALGO_FRESH, "", 1, 256, 256, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 4, 4 * 16 * 4194304, 0, fresh_regenhash, NULL, queue_fresh_kernel, gen_hash, NULL },
 
@@ -1394,9 +1453,9 @@ static algorithm_settings_t algos[] = {
   { "ethash-new",    ALGO_ETHASH,   "", 0x100010001LLU, 0x100010001LLU, 0x100010001LLU, 0, 0, 0xFF, 0xFFFF000000000000ULL, 72UL, 0, 128, 0, ethash_regenhash, NULL, queue_ethash_kernel, gen_hash, append_ethash_compiler_options },
 
   { "cryptonight", ALGO_CRYPTONIGHT, "", 1, 0x100010001LLU, 0x100010001LLU, 0, 0, 0xFF, 0xFFFFULL, 0x0000ffffUL, 6, 0, 0, cryptonight_regenhash, NULL, queue_cryptonight_kernel, gen_hash, NULL },
-  
+
   { "equihash",     ALGO_EQUIHASH,   "", 1, (1ULL << 28), (1ULL << 28), 0, 0, 0x20000, 0xFFFF000000000000ULL, 0x00000000UL, 0, 128, 0, equihash_regenhash, NULL, queue_equihash_kernel, gen_hash, append_equihash_compiler_options },
-  
+
   // Terminator (do not remove)
   { NULL, ALGO_UNK, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL }
 };
@@ -1459,6 +1518,7 @@ static const char *lookup_algorithm_alias(const char *lookup_alias, uint8_t *nfa
   ALGO_ALIAS_NF("adaptive-n-scrypt", "ckolivas", 11);
   ALGO_ALIAS("x11mod", "darkcoin-mod");
   ALGO_ALIAS("x11", "darkcoin-mod");
+  ALGO_ALIAS("x11evo", "evocoin");
   ALGO_ALIAS("x13mod", "marucoin-mod");
   ALGO_ALIAS("x13", "marucoin-mod");
   ALGO_ALIAS("x13old", "marucoin-modold");
