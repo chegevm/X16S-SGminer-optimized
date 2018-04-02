@@ -82,6 +82,7 @@ typedef struct _algorithm_t {
   cl_int(*queue_kernel)(struct __clState *, struct _dev_blk_ctx *, cl_uint);
   void(*gen_hash)(const unsigned char *, unsigned int, unsigned char *);
   void(*set_compile_options)(struct _build_kernel_data *, struct cgpu_info *, struct _algorithm_t *);
+  cl_int(*enqueue_kernels)(struct __clState *, size_t*, size_t*, size_t*);
 } algorithm_t;
 
 typedef struct _algorithm_settings_t
@@ -105,6 +106,7 @@ typedef struct _algorithm_settings_t
 	cl_int   (*queue_kernel)(struct __clState *, struct _dev_blk_ctx *, cl_uint);
 	void     (*gen_hash)(const unsigned char *, unsigned int, unsigned char *);
 	void     (*set_compile_options)(build_kernel_data *, struct cgpu_info *, algorithm_t *);
+	cl_int   (*enqueue_kernels)(struct __clState *, size_t*, size_t*, size_t*);
 } algorithm_settings_t;
 
 /* Set default parameters based on name. */
