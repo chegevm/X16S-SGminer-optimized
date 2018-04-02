@@ -1577,8 +1577,7 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
   else {
     status = clEnqueueNDRangeKernel(clState->commandQueue, clState->kernel, 1, p_global_work_offset,
 
-  else if ( gpu->algorithm.type == ALGO_X16R ||
-            gpu->algorithm.type == ALGO_X16S) {
+  else if (gpu->algorithm.type == ALGO_X16S) {
     unsigned char idx = thr->curSequence[0];
     // First 80-byte kernel
     if (idx >= 'A')
