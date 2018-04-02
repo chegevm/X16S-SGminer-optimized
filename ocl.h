@@ -36,12 +36,13 @@ typedef struct __clState {
   cl_uint vwidth;
   int devid;
   int monero_variant;
+  char algo_sequence[17];
   size_t max_work_size;
   size_t wsize;
   size_t compute_shaders;
 } _clState;
 
 extern int clDevicesNum(void);
-extern _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *algorithm);
+extern _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *algorithm, struct thr_info *thr);
 
 #endif /* OCL_H */
